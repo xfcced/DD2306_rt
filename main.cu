@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <time.h>
 #include <float.h>
 #include <curand_kernel.h>
@@ -148,9 +149,9 @@ __global__ void free_world(hitable **d_list, hitable **d_world, camera **d_camer
 int main() {
     int nx = 1200;
     int ny = 800;
-    int ns = 10;
-    int tx = 8;
-    int ty = 8;
+    int ns = 20;
+    int tx = 16;
+    int ty = 16;
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
     std::cerr << "in " << tx << "x" << ty << " blocks.\n";
@@ -201,16 +202,19 @@ int main() {
     std::cerr << "took " << timer_seconds << " seconds.\n";
 
     // Output FB as Image
-    std::cout << "P3\n" << nx << " " << ny << "\n255\n";
+    std::ofstream outfile("out.ppm");
+    outfile << "P3\n" << nx << " " << ny << "\n255\n";
     for (int j = ny-1; j >= 0; j--) {
         for (int i = 0; i < nx; i++) {
             size_t pixel_index = j*nx + i;
             int ir = int(255.99*fb[pixel_index].r());
             int ig = int(255.99*fb[pixel_index].g());
             int ib = int(255.99*fb[pixel_index].b());
-            std::cout << ir << " " << ig << " " << ib << "\n";
+            outfile << ir << " " << ig << " " << ib << "\n";
         }
     }
+    outfile.close();
+    std::cerr << "Image saved to out.ppm\n";
 
     // clean up
     checkCudaErrors(cudaDeviceSynchronize());
