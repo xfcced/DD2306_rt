@@ -3,12 +3,14 @@
 #include <time.h>
 #include <float.h>
 #include <curand_kernel.h>
+#include <cstring>
 #include "vec3.h"
 #include "ray.h"
 #include "sphere.h"
 #include "hitable_list.h"
 #include "camera.h"
 #include "material.h"
+#include "bvh.h"
 
 // limited version of checkCudaErrors from helper_cuda.h in CUDA examples
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
@@ -27,12 +29,40 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
 // it was blowing up the stack, so we have to turn this into a
 // limited-depth loop instead.  Later code in the book limits to a max
 // depth of 50, so we adapt this a few chapters early on the GPU.
+// Linear traversal color function
 __device__ vec3 color(const ray& r, hitable **world, curandState *local_rand_state) {
     ray cur_ray = r;
     vec3 cur_attenuation = vec3(1.0,1.0,1.0);
     for(int i = 0; i < 50; i++) {
         hit_record rec;
         if ((*world)->hit(cur_ray, 0.001f, FLT_MAX, rec)) {
+            ray scattered;
+            vec3 attenuation;
+            if(rec.mat_ptr->scatter(cur_ray, rec, attenuation, scattered, local_rand_state)) {
+                cur_attenuation *= attenuation;
+                cur_ray = scattered;
+            }
+            else {
+                return vec3(0.0,0.0,0.0);
+            }
+        }
+        else {
+            vec3 unit_direction = unit_vector(cur_ray.direction());
+            float t = 0.5f*(unit_direction.y() + 1.0f);
+            vec3 c = (1.0f-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0);
+            return cur_attenuation * c;
+        }
+    }
+    return vec3(0.0,0.0,0.0); // exceeded recursion
+}
+
+// BVH traversal color function
+__device__ vec3 color_bvh(const ray& r, BVHNode *bvh_nodes, hitable **d_list, curandState *local_rand_state) {
+    ray cur_ray = r;
+    vec3 cur_attenuation = vec3(1.0,1.0,1.0);
+    for(int i = 0; i < 50; i++) {
+        hit_record rec;
+        if (bvh_hit(bvh_nodes, d_list, cur_ray, 0.001f, FLT_MAX, rec)) {
             ray scattered;
             vec3 attenuation;
             if(rec.mat_ptr->scatter(cur_ray, rec, attenuation, scattered, local_rand_state)) {
@@ -71,7 +101,19 @@ __global__ void render_init(int max_x, int max_y, curandState *rand_state) {
     curand_init(1984+pixel_index, 0, 0, &rand_state[pixel_index]);
 }
 
-__global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hitable **world, curandState *rand_state) {
+// Export sphere geometry data from GPU to CPU (for BVH construction)
+__global__ void export_sphere_data(hitable **d_list, SphereGeom *geom_data, int num_spheres) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        for(int i = 0; i < num_spheres; i++) {
+            sphere *s = (sphere *)d_list[i];
+            geom_data[i].center = s->center;
+            geom_data[i].radius = s->radius;
+            geom_data[i].list_idx = i;
+        }
+    }
+}
+
+__global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hitable **world, curandState *rand_state, bool use_bvh, BVHNode *bvh_nodes, hitable **d_list) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
     if((i >= max_x) || (j >= max_y)) return;
@@ -82,7 +124,13 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hit
         float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
         float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
         ray r = (*cam)->get_ray(u, v, &local_rand_state);
-        col += color(r, world, &local_rand_state);
+        
+        // Choose traversal method based on flag
+        if (use_bvh) {
+            col += color_bvh(r, bvh_nodes, d_list, &local_rand_state);
+        } else {
+            col += color(r, world, &local_rand_state);
+        }
     }
     rand_state[pixel_index] = local_rand_state;
     col /= float(ns);
@@ -146,15 +194,28 @@ __global__ void free_world(hitable **d_list, hitable **d_world, camera **d_camer
     delete *d_camera;
 }
 
-int main() {
+int main(int argc, char** argv) {
     int nx = 1200;
     int ny = 800;
     int ns = 20;
     int tx = 16;
     int ty = 16;
+    
+    // Parse command line arguments
+    bool use_bvh = false;
+    for(int i = 1; i < argc; i++) {
+        if(strcmp(argv[i], "--use-bvh") == 0 || strcmp(argv[i], "--bvh") == 0) {
+            use_bvh = true;
+        }
+        else if((strcmp(argv[i], "--samples") == 0 || strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
+            ns = atoi(argv[++i]);
+            if(ns <= 0) ns = 20;  // Fallback to default if invalid
+        }
+    }
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
     std::cerr << "in " << tx << "x" << ty << " blocks.\n";
+    std::cerr << "Traversal method: " << (use_bvh ? "BVH" : "Linear") << "\n";
 
     int num_pixels = nx*ny;
     size_t fb_size = num_pixels*sizeof(vec3);
@@ -185,6 +246,37 @@ int main() {
     create_world<<<1,1>>>(d_list, d_world, d_camera, nx, ny, d_rand_state2);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
+    
+    // Build BVH if requested
+    BVHNode *d_bvh = nullptr;
+    if (use_bvh) {
+        std::cerr << "Building BVH...\n";
+        
+        // Export sphere data from GPU
+        SphereGeom *d_geom;
+        checkCudaErrors(cudaMalloc((void **)&d_geom, num_hitables*sizeof(SphereGeom)));
+        export_sphere_data<<<1,1>>>(d_list, d_geom, num_hitables);
+        checkCudaErrors(cudaGetLastError());
+        checkCudaErrors(cudaDeviceSynchronize());
+        
+        // Copy to CPU
+        SphereGeom *h_geom = new SphereGeom[num_hitables];
+        checkCudaErrors(cudaMemcpy(h_geom, d_geom, num_hitables*sizeof(SphereGeom), cudaMemcpyDeviceToHost));
+        
+        // Build BVH on CPU
+        int num_bvh_nodes;
+        BVHNode *h_bvh = build_bvh_cpu(h_geom, num_hitables, num_bvh_nodes);
+        std::cerr << "BVH built with " << num_bvh_nodes << " nodes\n";
+        
+        // Copy BVH to GPU
+        checkCudaErrors(cudaMalloc((void **)&d_bvh, num_bvh_nodes*sizeof(BVHNode)));
+        checkCudaErrors(cudaMemcpy(d_bvh, h_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemcpyHostToDevice));
+        
+        // Cleanup temporary data
+        checkCudaErrors(cudaFree(d_geom));
+        delete[] h_geom;
+        delete[] h_bvh;
+    }
 
     clock_t start, stop;
     start = clock();
@@ -194,7 +286,7 @@ int main() {
     render_init<<<blocks, threads>>>(nx, ny, d_rand_state);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
-    render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, d_world, d_rand_state);
+    render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, d_world, d_rand_state, use_bvh, d_bvh, d_list);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
     stop = clock();
@@ -226,6 +318,11 @@ int main() {
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_rand_state2));
     checkCudaErrors(cudaFree(fb));
+    
+    // Free BVH if allocated
+    if (d_bvh) {
+        checkCudaErrors(cudaFree(d_bvh));
+    }
 
     cudaDeviceReset();
 }

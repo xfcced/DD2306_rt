@@ -3,14 +3,14 @@ HOST_COMPILER  = g++
 NVCC           = $(CUDA_PATH)/bin/nvcc -ccbin $(HOST_COMPILER)
 
 # select one of these for Debug vs. Release
-NVCC_DBG       = -g -G
-NVCC_DBG       =
+NVCC_DBG       = -g -G #Debug
+NVCC_DBG       = #Release
 
-NVCCFLAGS      = $(NVCC_DBG) -m64
+NVCCFLAGS      = $(NVCC_DBG) -m64 --use_fast_math
 GENCODE_FLAGS  = -gencode arch=compute_86,code=sm_86
 
 SRCS = main.cu
-INCS = vec3.h ray.h hitable.h hitable_list.h sphere.h camera.h material.h
+INCS = vec3.h ray.h hitable.h hitable_list.h sphere.h camera.h material.h bvh.h
 
 cudart: cudart.o
 	$(NVCC) $(NVCCFLAGS) $(GENCODE_FLAGS) -o cudart cudart.o
@@ -22,16 +22,16 @@ out.ppm: cudart
 	rm -f out.ppm
 	./cudart > out.ppm
 
-out.jpg: out.ppm
-	rm -f out.jpg
-	ppmtojpeg out.ppm > out.jpg
+# out.jpg: out.ppm
+# 	rm -f out.jpg
+# 	ppmtojpeg out.ppm > out.jpg
 
-profile_basic: cudart
-	nvprof ./cudart > out.ppm
+# profile_basic: cudart
+# 	nvprof ./cudart > out.ppm
 
-# use nvprof --query-metrics
-profile_metrics: cudart
-	nvprof --metrics achieved_occupancy,inst_executed,inst_fp_32,inst_fp_64,inst_integer ./cudart > out.ppm
+# # use nvprof --query-metrics
+# profile_metrics: cudart
+# 	nvprof --metrics achieved_occupancy,inst_executed,inst_fp_32,inst_fp_64,inst_integer ./cudart > out.ppm
 
 clean:
 	rm -f cudart cudart.o out.ppm out.jpg
