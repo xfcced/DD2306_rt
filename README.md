@@ -28,7 +28,7 @@ Originally based on Roger Allen's CUDA port (May 2018). See the [original reposi
 ### Compilation
 
 ```bash
-make
+make clean && make
 ```
 
 This will compile the project with optimizations (`--use_fast_math`) and generate the `cudart` executable.
