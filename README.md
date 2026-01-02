@@ -1,81 +1,86 @@
-Ray Tracing in One Weekend in CUDA
-==================================
+## Introduction
 
-This is yet another _Ray Tracing in One Weekend_ clone, but this time using CUDA instead of C++.
+This project is a CUDA-accelerated implementation of "Ray Tracing in One Weekend" with advanced optimizations for GPU memory management and scene traversal. It demonstrates various CUDA memory strategies and acceleration structures for high-performance ray tracing.
 
-By Roger Allen
-May, 2018
+### Key Features
 
-See the [Master Branch](https://github.com/rogerallen/raytracinginoneweekend) for more information.
+- **GPU-accelerated Ray Tracing**: Parallelized rendering using CUDA kernels with per-thread random sampling
+- **BVH Acceleration**: Optional Bounding Volume Hierarchy for faster scene intersection tests
+- **Multiple Memory Modes**: Four different CUDA memory management strategies to explore performance characteristics:
+  - **Explicit Mode (0)**: Traditional `cudaMalloc` with explicit `cudaMemcpy` operations
+  - **Unified Memory (1)**: CUDA Unified Memory with automatic page migration
+  - **UM + Prefetch (2)**: Unified Memory with explicit prefetch hints for better locality
+  - **UM + Advise (3)**: Unified Memory with memory advice hints (preferred location, read-mostly)
+- **Configurable Rendering**: Adjustable samples per pixel and scene traversal methods
+- **Performance Monitoring**: Detailed timing for scene creation, BVH building, rendering, and image output
 
-Chapter 1
----------
+Originally based on Roger Allen's CUDA port (May 2018). See the [original repository](https://github.com/rogerallen/raytracinginoneweekend) for more information.
 
-This introduces the basic kernel launch mechanism & host/device memory management.  We are just creating an image on the GPU device and cudaMallocmanaged allows for sharing the framebuffer and automatically copying that buffer to & from the device.
+---
 
-I also added a timer to see how long it takes the GPU to do rendering.
+## Build Instructions
 
-Chapter 2
----------
+### Prerequisites
+- CUDA Toolkit (tested with compute capability 8.6)
+- NVCC compiler
+- C++ compiler (g++)
 
-Because CUDA is compatible with C++ and the vec3.h class will be used on both GPU & CPU, we add `__host__` `__device__` as a prefix to all methods.
+### Compilation
 
-Chapter 3
----------
+```bash
+make
+```
 
-Since the ray class is only used on the GPU, we will just add `__device__` as a prefix to all methods.
+This will compile the project with optimizations (`--use_fast_math`) and generate the `cudart` executable.
 
-The color function just needs a `__device__` added since this is called from the render kernel.
+For debug builds, edit the Makefile to uncomment the debug flags:
+```makefile
+NVCC_DBG = -g -G  # Debug
+```
 
-Note, doing a straight translation from the original C++ will mean that any floating-point constants will be doubles and math on the GPU will be forced to be double-precision.  This will hurt our performance unnecessarily.  Special attention to floating point constants must be taken (e.g. 0.5 -> 0.5f).
+---
 
-Use the "profile_metrics" makefile target to count inst_fp_64 and be sure that is 0.
+## Usage
 
-Chapter 4
----------
+### Command Line Options
 
-We only need to add a `__device__` to the hit_sphere() call and use profile_metrics to watch for those floating-point constants.
+```bash
+./cudart [options]
+```
 
-Chapter 5
----------
+**Available Options:**
 
-Here we have to create our world of spheres on the device and get familiar with how we do memory management for CUDA C++ classes.  Note the cudaMalloc of `d_list` and `d_world` and the `create_world` kernel.
+| Short | Long | Description | Default |
+|-------|------|-------------|---------|
+| `-b` | `--use-bvh` | Enable BVH acceleration structure for scene traversal | Linear traversal |
+| `-s <num>` | `--samples <num>` | Set samples per pixel for anti-aliasing | 20 |
+| `-m <mode>` | `--mem-mode <mode>` | Set memory management mode (0-3) | 0 |
 
-Again, attend to `__device__` and floating-point constants in hitable.h, hitable_list.h and sphere.h.
+**Memory Modes:**
+- `0` - **Explicit**: `cudaMalloc` + explicit `cudaMemcpy`
+- `1` - **UM**: Unified Memory without hints
+- `2` - **UM+Prefetch**: Unified Memory with `cudaMemPrefetchAsync`
+- `3` - **UM+Advise**: Unified Memory with `cudaMemAdvise`
 
-Chapter 6
----------
+### Examples
 
-In this chapter we need to understand using cuRAND for per-thread random numbers.  See `d_rand_state` and `render_init`.
+```bash
+# Default: Linear traversal, 20 samples, explicit memory mode
+./cudart
 
-Note that now using debug flags in compilation makes a big difference in runtime.  Remove those flags for a signficant speedup.
+# High quality render with BVH and 100 samples
+./cudart -b -s 100
 
-Chapter 7
----------
+# Test different memory modes
+./cudart -m 0  # Explicit mode
+./cudart -m 1  # Unified Memory
+./cudart -m 2  # UM + Prefetch
+./cudart -m 3  # UM + Advise
 
-Matching the C++ code in the color function in main.cu would recurse enough into the color() calls that it was crashing the program by overrunning the stack, so we turn this function into a limited-depth loop instead.  Later code in the book limits to a max depth of 50, so we adapt this a few chapters early on the GPU.
+# BVH with UM+Prefetch mode and 50 samples
+./cudart --use-bvh --samples 50 --mem-mode 2
+```
 
-Chapter 8
----------
+### Output
 
-Just more plumbing for per-thread local random state, mostly.
-
-Chapter 9
----------
-
-Similar to previous modifications.
-
-Chapter 10
-----------
-
-Similar to previous modifications.
-
-Chapter 11
-----------
-
-Similar to previous modifications.
-
-Chapter 12
-----------
-
-And we're done!
+The program generates `out.ppm` in PPM (P3) format, which can be viewed with image viewers.
