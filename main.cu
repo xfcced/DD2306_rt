@@ -194,6 +194,13 @@ __global__ void free_world(hitable **d_list, hitable **d_world, camera **d_camer
     delete *d_camera;
 }
 
+enum MemoryMode {
+    MEM_EXPLICIT = 0,  // cudaMalloc + explicit cudaMemcpy
+    MEM_UM = 1,        // Unified Memory without hints
+    MEM_UM_PREFETCH = 2,  // Unified Memory + cudaMemPrefetchAsync
+    MEM_UM_ADVISE = 3     // Unified Memory + cudaMemAdvise
+};
+
 int main(int argc, char** argv) {
     int nx = 1200;
     int ny = 800;
@@ -203,29 +210,51 @@ int main(int argc, char** argv) {
     
     // Parse command line arguments
     bool use_bvh = false;
+    MemoryMode mem_mode = MEM_EXPLICIT;
     for(int i = 1; i < argc; i++) {
-        if(strcmp(argv[i], "--use-bvh") == 0 || strcmp(argv[i], "--bvh") == 0) {
+        if(strcmp(argv[i], "--use-bvh") == 0 || strcmp(argv[i], "-b") == 0) {
             use_bvh = true;
         }
         else if((strcmp(argv[i], "--samples") == 0 || strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             ns = atoi(argv[++i]);
             if(ns <= 0) ns = 20;  // Fallback to default if invalid
         }
+        else if((strcmp(argv[i], "--mem-mode") == 0 || strcmp(argv[i], "-m") == 0) && i + 1 < argc) {
+            int mode = atoi(argv[++i]);
+            if(mode >= 0 && mode <= 3) {
+                mem_mode = (MemoryMode)mode;
+            }
+        }
     }
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
     std::cerr << "in " << tx << "x" << ty << " blocks.\n";
     std::cerr << "Traversal method: " << (use_bvh ? "BVH" : "Linear") << "\n";
+    const char* mem_mode_names[] = {"Explicit", "UM", "UM+Prefetch", "UM+Advise"};
+    std::cerr << "Memory mode: " << mem_mode_names[mem_mode] << "\n";
 
     int num_pixels = nx*ny;
     size_t fb_size = num_pixels*sizeof(vec3);
 
     clock_t scene_start = clock(); // scene creation timer start
 
-    // allocate FB
+    // allocate FB based on memory mode
     vec3 *fb;
-    checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
-    checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, 0));
+    vec3 *h_fb = nullptr;  // Host buffer for explicit mode
+    if (mem_mode == MEM_EXPLICIT) {
+        // Explicit: allocate device memory and host buffer
+        checkCudaErrors(cudaMalloc((void **)&fb, fb_size));
+        h_fb = new vec3[num_pixels];
+    } else {
+        // UM modes: use unified memory
+        checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
+        if (mem_mode == MEM_UM_PREFETCH) {
+            checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, 0));
+        } else if (mem_mode == MEM_UM_ADVISE) {
+            checkCudaErrors(cudaMemAdvise(fb, fb_size, cudaMemAdviseSetPreferredLocation, 0));
+            checkCudaErrors(cudaMemAdvise(fb, fb_size, cudaMemAdviseSetAccessedBy, cudaCpuDeviceId));
+        }
+    }
 
     // allocate random state
     curandState *d_rand_state;
@@ -256,35 +285,72 @@ int main(int argc, char** argv) {
     
     // Build BVH if requested
     BVHNode *d_bvh = nullptr;
+    int num_bvh_nodes = 0;
     if (use_bvh) {
         clock_t bvh_start = clock(); // BVH building timer start
         
-        // Export sphere data from GPU
-        SphereGeom *d_geom;
-        checkCudaErrors(cudaMalloc((void **)&d_geom, num_hitables*sizeof(SphereGeom)));
-        export_sphere_data<<<1,1>>>(d_list, d_geom, num_hitables);
-        checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
+        SphereGeom *geom;
+        SphereGeom *h_geom = nullptr;
         
-        // Copy to CPU
-        SphereGeom *h_geom = new SphereGeom[num_hitables];
-        checkCudaErrors(cudaMemcpy(h_geom, d_geom, num_hitables*sizeof(SphereGeom), cudaMemcpyDeviceToHost));
+        if (mem_mode == MEM_EXPLICIT) {
+            // Explicit mode: device memory + explicit copy
+            checkCudaErrors(cudaMalloc((void **)&geom, num_hitables*sizeof(SphereGeom)));
+            export_sphere_data<<<1,1>>>(d_list, geom, num_hitables);
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
+            
+            // Copy to host
+            h_geom = new SphereGeom[num_hitables];
+            checkCudaErrors(cudaMemcpy(h_geom, geom, num_hitables*sizeof(SphereGeom), cudaMemcpyDeviceToHost));
+        } else {
+            // UM modes: use unified memory
+            checkCudaErrors(cudaMallocManaged((void **)&geom, num_hitables*sizeof(SphereGeom)));
+            if (mem_mode == MEM_UM_PREFETCH) {
+                checkCudaErrors(cudaMemPrefetchAsync(geom, num_hitables*sizeof(SphereGeom), 0));
+            } else if (mem_mode == MEM_UM_ADVISE) {
+                checkCudaErrors(cudaMemAdvise(geom, num_hitables*sizeof(SphereGeom), cudaMemAdviseSetPreferredLocation, 0));
+                checkCudaErrors(cudaMemAdvise(geom, num_hitables*sizeof(SphereGeom), cudaMemAdviseSetAccessedBy, cudaCpuDeviceId));
+            }
+            export_sphere_data<<<1,1>>>(d_list, geom, num_hitables);
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
+            
+            // Prefetch to CPU if using prefetch mode
+            if (mem_mode == MEM_UM_PREFETCH) {
+                checkCudaErrors(cudaMemPrefetchAsync(geom, num_hitables*sizeof(SphereGeom), cudaCpuDeviceId));
+                checkCudaErrors(cudaDeviceSynchronize());
+            }
+            h_geom = geom;  // Can access directly in UM modes
+        }
         
         // Build BVH on CPU
-        int num_bvh_nodes;
         BVHNode *h_bvh = build_bvh_cpu(h_geom, num_hitables, num_bvh_nodes);
         
-        // Copy BVH to GPU
-        checkCudaErrors(cudaMalloc((void **)&d_bvh, num_bvh_nodes*sizeof(BVHNode)));
-        checkCudaErrors(cudaMemcpy(d_bvh, h_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemcpyHostToDevice));
+        // Allocate and transfer BVH based on memory mode
+        if (mem_mode == MEM_EXPLICIT) {
+            checkCudaErrors(cudaMalloc((void **)&d_bvh, num_bvh_nodes*sizeof(BVHNode)));
+            checkCudaErrors(cudaMemcpy(d_bvh, h_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemcpyHostToDevice));
+        } else {
+            checkCudaErrors(cudaMallocManaged((void **)&d_bvh, num_bvh_nodes*sizeof(BVHNode)));
+            memcpy(d_bvh, h_bvh, num_bvh_nodes*sizeof(BVHNode));
+            
+            if (mem_mode == MEM_UM_PREFETCH) {
+                checkCudaErrors(cudaMemPrefetchAsync(d_bvh, num_bvh_nodes*sizeof(BVHNode), 0));
+            } else if (mem_mode == MEM_UM_ADVISE) {
+                checkCudaErrors(cudaMemAdvise(d_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemAdviseSetPreferredLocation, 0));
+                checkCudaErrors(cudaMemAdvise(d_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemAdviseSetReadMostly, 0));
+            }
+        }
         
         clock_t bvh_stop = clock();
         double bvh_time = ((double)(bvh_stop - bvh_start)) / CLOCKS_PER_SEC * 1000.0;
         std::cerr << "BVH built with " << num_bvh_nodes << " nodes, took " << bvh_time << " ms.\n";
         
         // Cleanup temporary data
-        checkCudaErrors(cudaFree(d_geom));
-        delete[] h_geom;
+        checkCudaErrors(cudaFree(geom));
+        if (mem_mode == MEM_EXPLICIT) {
+            delete[] h_geom;
+        }
         delete[] h_bvh;
     }
 
@@ -299,7 +365,16 @@ int main(int argc, char** argv) {
     render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, d_world, d_rand_state, use_bvh, d_bvh, d_list);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
-    // checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, cudaCpuDeviceId));
+    
+    // Handle data transfer based on memory mode
+    if (mem_mode == MEM_EXPLICIT) {
+        checkCudaErrors(cudaMemcpy(h_fb, fb, fb_size, cudaMemcpyDeviceToHost));
+    } else if (mem_mode == MEM_UM_PREFETCH) {
+        checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, cudaCpuDeviceId));
+        checkCudaErrors(cudaDeviceSynchronize());
+    }
+    // For MEM_UM and MEM_UM_ADVISE, no explicit action needed - automatic migration
+    
     stop = clock();
     double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
     std::cerr << "Rendering took " << timer_seconds << " seconds.\n";
@@ -308,12 +383,14 @@ int main(int argc, char** argv) {
     clock_t ppm_start = clock();
     std::ofstream outfile("out.ppm");
     outfile << "P3\n" << nx << " " << ny << "\n255\n";
+    
+    vec3 *output_fb = (mem_mode == MEM_EXPLICIT) ? h_fb : fb;
     for (int j = ny-1; j >= 0; j--) {
         for (int i = 0; i < nx; i++) {
             size_t pixel_index = j*nx + i;
-            int ir = int(255.99*fb[pixel_index].r());
-            int ig = int(255.99*fb[pixel_index].g());
-            int ib = int(255.99*fb[pixel_index].b());
+            int ir = int(255.99*output_fb[pixel_index].r());
+            int ig = int(255.99*output_fb[pixel_index].g());
+            int ib = int(255.99*output_fb[pixel_index].b());
             outfile << ir << " " << ig << " " << ib << "\n";
         }
     }
@@ -332,6 +409,11 @@ int main(int argc, char** argv) {
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_rand_state2));
     checkCudaErrors(cudaFree(fb));
+    
+    // Free host buffer if using explicit mode
+    if (h_fb) {
+        delete[] h_fb;
+    }
     
     // Free BVH if allocated
     if (d_bvh) {
