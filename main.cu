@@ -220,9 +220,12 @@ int main(int argc, char** argv) {
     int num_pixels = nx*ny;
     size_t fb_size = num_pixels*sizeof(vec3);
 
+    clock_t scene_start = clock(); // scene creation timer start
+
     // allocate FB
     vec3 *fb;
     checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
+    checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, 0));
 
     // allocate random state
     curandState *d_rand_state;
@@ -247,10 +250,14 @@ int main(int argc, char** argv) {
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
     
+    clock_t scene_stop = clock();
+    double scene_time = ((double)(scene_stop - scene_start)) / CLOCKS_PER_SEC * 1000.0;
+    std::cerr << "Scene creation took " << scene_time << " ms.\n";
+    
     // Build BVH if requested
     BVHNode *d_bvh = nullptr;
     if (use_bvh) {
-        std::cerr << "Building BVH...\n";
+        clock_t bvh_start = clock(); // BVH building timer start
         
         // Export sphere data from GPU
         SphereGeom *d_geom;
@@ -266,11 +273,14 @@ int main(int argc, char** argv) {
         // Build BVH on CPU
         int num_bvh_nodes;
         BVHNode *h_bvh = build_bvh_cpu(h_geom, num_hitables, num_bvh_nodes);
-        std::cerr << "BVH built with " << num_bvh_nodes << " nodes\n";
         
         // Copy BVH to GPU
         checkCudaErrors(cudaMalloc((void **)&d_bvh, num_bvh_nodes*sizeof(BVHNode)));
         checkCudaErrors(cudaMemcpy(d_bvh, h_bvh, num_bvh_nodes*sizeof(BVHNode), cudaMemcpyHostToDevice));
+        
+        clock_t bvh_stop = clock();
+        double bvh_time = ((double)(bvh_stop - bvh_start)) / CLOCKS_PER_SEC * 1000.0;
+        std::cerr << "BVH built with " << num_bvh_nodes << " nodes, took " << bvh_time << " ms.\n";
         
         // Cleanup temporary data
         checkCudaErrors(cudaFree(d_geom));
@@ -289,11 +299,13 @@ int main(int argc, char** argv) {
     render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, d_world, d_rand_state, use_bvh, d_bvh, d_list);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, cudaCpuDeviceId));
     stop = clock();
     double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
-    std::cerr << "took " << timer_seconds << " seconds.\n";
+    std::cerr << "Rendering took " << timer_seconds << " seconds.\n";
 
     // Output FB as Image
+    clock_t ppm_start = clock();
     std::ofstream outfile("out.ppm");
     outfile << "P3\n" << nx << " " << ny << "\n255\n";
     for (int j = ny-1; j >= 0; j--) {
@@ -306,7 +318,9 @@ int main(int argc, char** argv) {
         }
     }
     outfile.close();
-    std::cerr << "Image saved to out.ppm\n";
+    clock_t ppm_stop = clock();
+    double ppm_time = ((double)(ppm_stop - ppm_start)) / CLOCKS_PER_SEC * 1000.0;
+    std::cerr << "Image saved to out.ppm, took "<< ppm_time <<" ms.\n";
 
     // clean up
     checkCudaErrors(cudaDeviceSynchronize());
