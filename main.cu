@@ -170,8 +170,6 @@ __global__ void create_world(hitable **d_list, hitable **d_world, camera **d_cam
                 }
             }
         }
-        // Record actual number of small spheres created
-        int actual_small_spheres = i - 1;
         
         d_list[i++] = new sphere(vec3(0, 1,0),  1.0, new dielectric(1.5));
         d_list[i++] = new sphere(vec3(-4, 1, 0), 1.0, new lambertian(vec3(0.4, 0.2, 0.1)));
@@ -304,10 +302,6 @@ int main(int argc, char** argv) {
     checkCudaErrors(cudaMemcpy(&num_hitables, d_actual_count, sizeof(int), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaFree(d_actual_count));
     
-    clock_t scene_stop = clock();
-    double scene_time = ((double)(scene_stop - scene_start)) / CLOCKS_PER_SEC * 1000.0;
-    std::cerr << "Scene creation took " << scene_time << " ms.\n";
-    
     // Build BVH if requested
     BVHNode *d_bvh = nullptr;
     int num_bvh_nodes = 0;
@@ -379,6 +373,10 @@ int main(int argc, char** argv) {
         delete[] h_bvh;
     }
 
+    clock_t scene_stop = clock();
+    double scene_time = ((double)(scene_stop - scene_start)) / CLOCKS_PER_SEC * 1000.0;
+    std::cerr << "Scene creation took " << scene_time << " ms.\n";
+
     clock_t start, stop;
     start = clock();
     // Render our buffer
@@ -401,8 +399,8 @@ int main(int argc, char** argv) {
     // For MEM_UM and MEM_UM_ADVISE, no explicit action needed - automatic migration
     
     stop = clock();
-    double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
-    std::cerr << "Rendering took " << timer_seconds << " seconds.\n";
+    double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC * 1000.0;
+    std::cerr << "Rendering took " << timer_seconds << " ms.\n";
 
     // Output FB as Image
     clock_t ppm_start = clock();
