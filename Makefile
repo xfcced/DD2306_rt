@@ -1,6 +1,6 @@
 CUDA_PATH     ?= /usr
 HOST_COMPILER  = g++
-NVCC           = $(CUDA_PATH)/bin/nvcc -ccbin $(HOST_COMPILER)
+NVCC           = nvcc -ccbin $(HOST_COMPILER)
 
 # select one of these for Debug vs. Release
 NVCC_DBG       = #Release
