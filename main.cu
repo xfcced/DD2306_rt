@@ -142,14 +142,19 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hit
 
 #define RND (curand_uniform(&local_rand_state))
 
-__global__ void create_world(hitable **d_list, hitable **d_world, camera **d_camera, int nx, int ny, curandState *rand_state) {
+__global__ void create_world(hitable **d_list, hitable **d_world, camera **d_camera, int nx, int ny, curandState *rand_state, int num_small_spheres, int *actual_count) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         curandState local_rand_state = *rand_state;
         d_list[0] = new sphere(vec3(0,-1000.0,-1), 1000,
                                new lambertian(vec3(0.5, 0.5, 0.5)));
         int i = 1;
-        for(int a = -11; a < 11; a++) {
-            for(int b = -11; b < 11; b++) {
+        // Calculate grid size based on number of small spheres
+        // Use a slightly larger grid to ensure we can create enough spheres
+        int grid_size = (int)ceil(sqrt((float)num_small_spheres));
+        int half_grid = (grid_size + 1) / 2;  // Round up for odd sizes
+        
+        for(int a = -half_grid; a <= half_grid && i <= num_small_spheres; a++) {
+            for(int b = -half_grid; b <= half_grid && i <= num_small_spheres; b++) {
                 float choose_mat = RND;
                 vec3 center(a+RND,0.2,b+RND);
                 if(choose_mat < 0.8f) {
@@ -165,11 +170,15 @@ __global__ void create_world(hitable **d_list, hitable **d_world, camera **d_cam
                 }
             }
         }
+        // Record actual number of small spheres created
+        int actual_small_spheres = i - 1;
+        
         d_list[i++] = new sphere(vec3(0, 1,0),  1.0, new dielectric(1.5));
         d_list[i++] = new sphere(vec3(-4, 1, 0), 1.0, new lambertian(vec3(0.4, 0.2, 0.1)));
         d_list[i++] = new sphere(vec3(4, 1, 0),  1.0, new metal(vec3(0.7, 0.6, 0.5), 0.0));
         *rand_state = local_rand_state;
-        *d_world  = new hitable_list(d_list, 22*22+1+3);
+        *d_world  = new hitable_list(d_list, i);  // Use actual count
+        *actual_count = i;  // Return actual total count
 
         vec3 lookfrom(13,2,3);
         vec3 lookat(0,0,0);
@@ -185,8 +194,8 @@ __global__ void create_world(hitable **d_list, hitable **d_world, camera **d_cam
     }
 }
 
-__global__ void free_world(hitable **d_list, hitable **d_world, camera **d_camera) {
-    for(int i=0; i < 22*22+1+3; i++) {
+__global__ void free_world(hitable **d_list, hitable **d_world, camera **d_camera, int num_hitables) {
+    for(int i=0; i < num_hitables; i++) {
         delete ((sphere *)d_list[i])->mat_ptr;
         delete d_list[i];
     }
@@ -207,6 +216,7 @@ int main(int argc, char** argv) {
     int ns = 20;
     int tx = 16;
     int ty = 16;
+    int num_small_spheres = 22*22;  // Default: 484 small spheres
     
     // Parse command line arguments
     bool use_bvh = false;
@@ -225,6 +235,10 @@ int main(int argc, char** argv) {
                 mem_mode = (MemoryMode)mode;
             }
         }
+        else if((strcmp(argv[i], "--objects") == 0 || strcmp(argv[i], "-o") == 0) && i + 1 < argc) {
+            num_small_spheres = atoi(argv[++i]);
+            if(num_small_spheres <= 0) num_small_spheres = 22*22;  // Fallback to default if invalid
+        }
     }
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
@@ -232,6 +246,7 @@ int main(int argc, char** argv) {
     std::cerr << "Traversal method: " << (use_bvh ? "BVH" : "Linear") << "\n";
     const char* mem_mode_names[] = {"Explicit", "UM", "UM+Prefetch", "UM+Advise"};
     std::cerr << "Memory mode: " << mem_mode_names[mem_mode] << "\n";
+    std::cerr << "Number of objects: " << (num_small_spheres + 1 + 3) << " (" << num_small_spheres << " small + 1 ground + 3 large)\n";
 
     int num_pixels = nx*ny;
     size_t fb_size = num_pixels*sizeof(vec3);
@@ -269,15 +284,25 @@ int main(int argc, char** argv) {
 
     // make our world of hitables & the camera
     hitable **d_list;
-    int num_hitables = 22*22+1+3;
-    checkCudaErrors(cudaMalloc((void **)&d_list, num_hitables*sizeof(hitable *)));
+    int max_hitables = num_small_spheres+1+3;  // Maximum possible: small spheres + ground + 3 large spheres
+    checkCudaErrors(cudaMalloc((void **)&d_list, max_hitables*sizeof(hitable *)));
     hitable **d_world;
     checkCudaErrors(cudaMalloc((void **)&d_world, sizeof(hitable *)));
     camera **d_camera;
     checkCudaErrors(cudaMalloc((void **)&d_camera, sizeof(camera *)));
-    create_world<<<1,1>>>(d_list, d_world, d_camera, nx, ny, d_rand_state2);
+    
+    // Allocate space for actual count
+    int *d_actual_count;
+    checkCudaErrors(cudaMalloc((void **)&d_actual_count, sizeof(int)));
+    
+    create_world<<<1,1>>>(d_list, d_world, d_camera, nx, ny, d_rand_state2, num_small_spheres, d_actual_count);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
+    
+    // Get actual count from device
+    int num_hitables;
+    checkCudaErrors(cudaMemcpy(&num_hitables, d_actual_count, sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaFree(d_actual_count));
     
     clock_t scene_stop = clock();
     double scene_time = ((double)(scene_stop - scene_start)) / CLOCKS_PER_SEC * 1000.0;
@@ -401,7 +426,7 @@ int main(int argc, char** argv) {
 
     // clean up
     checkCudaErrors(cudaDeviceSynchronize());
-    free_world<<<1,1>>>(d_list,d_world,d_camera);
+    free_world<<<1,1>>>(d_list,d_world,d_camera,num_hitables);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaFree(d_camera));
     checkCudaErrors(cudaFree(d_world));

@@ -3,3 +3,5 @@ cudart.o
 out.jpg
 out.ppm
 NVIDIA*SDK*
+report
+.vscode

@@ -55,6 +55,7 @@ NVCC_DBG = -g -G  # Debug
 | `-b` | `--use-bvh` | Enable BVH acceleration structure for scene traversal | Linear traversal |
 | `-s <num>` | `--samples <num>` | Set samples per pixel for anti-aliasing | 20 |
 | `-m <mode>` | `--mem-mode <mode>` | Set memory management mode (0-3) | 0 |
+| `-o <num>` | `--objects <num>` | Set number of small spheres in the scene | 484 |
 
 **Memory Modes:**
 - `0` - **Explicit**: `cudaMalloc` + explicit `cudaMemcpy`
@@ -65,11 +66,17 @@ NVCC_DBG = -g -G  # Debug
 ### Examples
 
 ```bash
-# Default: Linear traversal, 20 samples, explicit memory mode
+# Default: Linear traversal, 20 samples, explicit memory mode, 484 small spheres
 ./cudart
 
 # High quality render with BVH and 100 samples
 ./cudart -b -s 100
+
+# Custom scene with 1000 small spheres
+./cudart -o 1000
+
+# Small scene with 100 spheres for faster testing
+./cudart -b -o 100 -s 10
 
 # Test different memory modes
 ./cudart -m 0  # Explicit mode
@@ -77,10 +84,20 @@ NVCC_DBG = -g -G  # Debug
 ./cudart -m 2  # UM + Prefetch
 ./cudart -m 3  # UM + Advise
 
-# BVH with UM+Prefetch mode and 50 samples
-./cudart --use-bvh --samples 50 --mem-mode 2
+# BVH with UM+Prefetch mode, 50 samples, and 500 spheres
+./cudart --use-bvh --samples 50 --mem-mode 2 --objects 500
 ```
 
 ### Output
 
 The program generates `out.ppm` in PPM (P3) format, which can be viewed with image viewers.
+
+**Scene Composition:**
+- 1 large ground sphere (radius 1000)
+- Configurable number of small random spheres (radius 0.2, default 484)
+  - Small spheres are distributed in a grid pattern with random offsets
+  - Materials: 80% diffuse (lambertian), 15% metallic, 5% dielectric (glass)
+- 3 large decorative spheres (radius 1.0):
+  - Center: Glass sphere at (0, 1, 0)
+  - Left: Diffuse sphere at (-4, 1, 0)
+  - Right: Metallic sphere at (4, 1, 0)
