@@ -337,7 +337,6 @@ int main(int argc, char** argv) {
             // Prefetch to CPU if using prefetch mode
             if (mem_mode == MEM_UM_PREFETCH) {
                 checkCudaErrors(cudaMemPrefetchAsync(geom, num_hitables*sizeof(SphereGeom), cudaCpuDeviceId));
-                checkCudaErrors(cudaDeviceSynchronize());
             }
             h_geom = geom;  // Can access directly in UM modes
         }
@@ -388,19 +387,19 @@ int main(int argc, char** argv) {
     render<<<blocks, threads>>>(fb, nx, ny,  ns, d_camera, d_world, d_rand_state, use_bvh, d_bvh, d_list);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
+
+    stop = clock();
+    double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC * 1000.0;
+    std::cerr << "Rendering took " << timer_seconds << " ms.\n";
     
     // Handle data transfer based on memory mode
     if (mem_mode == MEM_EXPLICIT) {
         checkCudaErrors(cudaMemcpy(h_fb, fb, fb_size, cudaMemcpyDeviceToHost));
     } else if (mem_mode == MEM_UM_PREFETCH) {
         checkCudaErrors(cudaMemPrefetchAsync(fb, fb_size, cudaCpuDeviceId));
-        checkCudaErrors(cudaDeviceSynchronize());
+    } else if (mem_mode == MEM_UM_ADVISE) {
+        checkCudaErrors(cudaMemAdvise(fb, fb_size, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId));
     }
-    // For MEM_UM and MEM_UM_ADVISE, no explicit action needed - automatic migration
-    
-    stop = clock();
-    double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC * 1000.0;
-    std::cerr << "Rendering took " << timer_seconds << " ms.\n";
 
     // Output FB as Image
     clock_t ppm_start = clock();
